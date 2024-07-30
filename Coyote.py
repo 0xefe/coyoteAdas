@@ -1,93 +1,100 @@
-import torch
 import cv2
-import os
 import numpy as np
+import torch
 
-# YOLOv5 modelini yükle (önceden eğitilmiş model)
-model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
+def lane_detection(frame):
+    """Gelişmiş şerit tespiti yap."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    
+    height, width = frame.shape[:2]
+    roi_vertices = np.array([[
+        (0, height),
+        (width, height),
+        (width * 0.9, height * 0.6),
+        (width * 0.1, height * 0.6)
+    ]], np.int32)
+    
+    mask = np.zeros_like(edges)
+    cv2.fillPoly(mask, roi_vertices, 255)
+    masked_edges = cv2.bitwise_and(edges, mask)
+    
+    lines = cv2.HoughLinesP(masked_edges, 1, np.pi / 180, 20, minLineLength=20, maxLineGap=300)
+    
+    left_fit = []
+    right_fit = []
+    if lines is not None:
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            parameters = np.polyfit((x1, x2), (y1, y2), 1)
+            slope = parameters[0]
+            intercept = parameters[1]
+            if slope < 0:
+                left_fit.append((slope, intercept))
+            else:
+                right_fit.append((slope, intercept))
+    
+        if left_fit and right_fit:
+            left_fit_average = np.average(left_fit, axis=0)
+            right_fit_average = np.average(right_fit, axis=0)
+            
+            y1 = height
+            y2 = int(height * 0.6)
+            left_x1 = int((y1 - left_fit_average[1]) / left_fit_average[0])
+            left_x2 = int((y2 - left_fit_average[1]) / left_fit_average[0])
+            right_x1 = int((y1 - right_fit_average[1]) / right_fit_average[0])
+            right_x2 = int((y2 - right_fit_average[1]) / right_fit_average[0])
+            
+            cv2.line(frame, (left_x1, y1), (left_x2, y2), (0, 255, 0), 2)
+            cv2.line(frame, (right_x1, y1), (right_x2, y2), (0, 255, 0), 2)
+    
+    return frame
 
-# Video dosyalarının yollarını belirleyin
-video_root = 'C:/projeler/footages'
-video_paths = [
-    f'{video_root}/4586141-hd_1920_1080_30fps.mp4',  # İlk video dosyasını fotoğraf ile değiştirin
-    f'{video_root}/testvideo.mp4',
-    f'{video_root}/4644521-uhd_2562_1440_30fps.mp4',
-    f'{video_root}/4644508-uhd_2562_1440_30fps.mp4',
-    f'{video_root}/vecteezy_abstract-blurry-busy-traffic-with-chaotic-vehicles_35196149.mp4',
-    # Daha fazla video yolu ekleyin
-]
+def collision_warning(frame, model):
+    """Araç tespiti yap ve çarpışma uyarısı ver."""
+    results = model(frame)
+    detections = results.xyxy[0]
 
-# Önceki karedeki nesnelerin pozisyonlarını saklamak için bir sözlük
-previous_positions = {}
+    for *box, conf, cls in detections:
+        x1, y1, x2, y2 = map(int, box)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        cv2.putText(frame, f'Confidence: {conf:.2f}', (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
-# FPS (kare hızı) bilgisini saklamak için bir değişken
-fps = 30
+        if conf > 0.5:
+            cv2.putText(frame, "Dikkat! Çarpışma Riski", (x1, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
-# Her bir video veya fotoğraf dosyasını işleyin
-for video_path in video_paths:
-    if video_path.endswith(('.png', '.jpg', '.jpeg')):
-        # Eğer dosya bir fotoğraf ise
-        img = cv2.imread(video_path)
+    return frame
 
-        # YOLOv5 modelini kullanarak nesne algılama
-        results = model(img)
-        detections = results.xyxy[0].numpy()  # Tespit edilen nesnelerin koordinatları
+def process_video(video_path):
+    """Video dosyasını işleyin."""
+    cap = cv2.VideoCapture(video_path)
 
-        for *box, conf, cls in detections:
-            x1, y1, x2, y2 = map(int, box)
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            label = f'{model.names[int(cls)]}: {conf:.2f}'
-            cv2.putText(img, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    if not cap.isOpened():
+        print(f"Video açılamadı: {video_path}")
+        return
 
-        # Sonuçları göster
-        cv2.imshow('ADAS - Coyote', img)
+    model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
 
-        # İşlenmiş fotoğrafı kaydet
-        output_path = os.path.join('C:/Users/kids/source/repos/Coyote/output/', os.path.basename(video_path))
-        cv2.imwrite(output_path, img)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Video sonlandı.")
+            break
 
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        # Şerit tespiti
+        frame = lane_detection(frame)
+        # Araç tespiti
+        frame = collision_warning(frame, model)
 
-    else:
-        # Eğer dosya bir video ise
-        cap = cv2.VideoCapture(video_path)
+        # Sonucu göster
+        cv2.imshow('ADAS', frame)
 
-        # FPS (kare hızı) değerini al
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+    cap.release()
+    cv2.destroyAllWindows()
 
-            # YOLOv5 modelini kullanarak nesne algılama
-            results = model(frame)
-            detections = results.xyxy[0].numpy()  # Tespit edilen nesnelerin koordinatları
-
-            for *box, conf, cls in detections:
-                x1, y1, x2, y2 = map(int, box)
-                object_id = f'{x1}{y1}{x2}{y2}'
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                label = f'{model.names[int(cls)]}: {conf:.2f}'
-
-                # Hız tahmini
-                if object_id in previous_positions:
-                    prev_x1, prev_y1, prev_x2, prev_y2 = previous_positions[object_id]
-                    dx = x1 - prev_x1
-                    dy = y1 - prev_y1
-                    distance = np.sqrt(dx**2 + dy**2)
-                    speed = distance * fps * 0.036  # Hızı km/h cinsinden tahmin et
-                    label += f' Speed: {speed:.2f} km/h'
-                
-                previous_positions[object_id] = (x1, y1, x2, y2)
-
-                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-            cv2.imshow('ADAS - Coyote', frame)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-        cap.release()
-        cv2.destroyAllWindows()
+if __name__ == '__main__':
+    video_path = r'C:\projeler\footages\traffic.mp4'  # Kendi video dosyanızın yolunu yazın
+    process_video(video_path)
